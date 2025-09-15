@@ -43,3 +43,22 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+.firebaserc
+
+# Firebase config files with secrets (DO NOT commit)
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
+macos/Runner/GoogleService-Info.plist
+
+# VirtuCam specific
+/configs/firebase/production/
+/tools/security/keys/
+/scripts/deploy/production/
+
+# Keep the generated options file (safe to commit)
+!lib/firebase_options.dart
