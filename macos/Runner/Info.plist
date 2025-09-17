@@ -28,5 +28,56 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	
+	<!-- Network Permissions -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>firebase.googleapis.com</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<false/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.2</string>
+			</dict>
+			<key>identitytoolkit.googleapis.com</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<false/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.2</string>
+			</dict>
+			<key>firestore.googleapis.com</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<false/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.2</string>
+			</dict>
+		</dict>
+	</dict>
+	
+	<!-- File Access Permissions -->
+	<key>NSCameraUsageDescription</key>
+	<string>VirtuCam needs camera access to create virtual camera feeds</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>VirtuCam needs microphone access for audio streaming</string>
+	<key>NSScreenCaptureDescription</key>
+	<string>VirtuCam needs screen recording permission to capture and stream your desktop</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>VirtuCam needs access to browse and stream media files from your folders</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>VirtuCam needs access to browse and stream documents</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>VirtuCam needs access to browse and stream files from Downloads</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>VirtuCam needs access to browse media files on external drives</string>
+	
+	<!-- File Picker Entitlement -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
 </dict>
 </plist>

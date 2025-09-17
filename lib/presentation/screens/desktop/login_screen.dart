@@ -76,18 +76,44 @@ class _VirtuCamLoginScreenState extends State<VirtuCamLoginScreen>
       final email = _emailController.text.trim();
       final password = _passwordController.text;
 
+      print('VirtuCam: Attempting login with email: $email'); // Debug
+
       await _authService.signInWithEmail(email, password);
+
+      print('VirtuCam: Login successful'); // Debug
 
       if (mounted) {
         Navigator.pushReplacementNamed(context, '/dashboard');
       }
+    } on FirebaseAuthException catch (e) {
+      print('VirtuCam Firebase Error: ${e.code} - ${e.message}'); // Debug
+      setState(() {
+        switch (e.code) {
+          case 'network-request-failed':
+            _errorMessage = 'Network error. Check your internet connection.';
+            break;
+          case 'user-not-found':
+            _errorMessage = 'No account found with this email.';
+            break;
+          case 'wrong-password':
+            _errorMessage = 'Incorrect password.';
+            break;
+          case 'too-many-requests':
+            _errorMessage = 'Too many failed attempts. Try again later.';
+            break;
+          default:
+            _errorMessage = 'Login failed: ${e.message}';
+        }
+      });
     } on Exception catch (e) {
+      print('VirtuCam Exception: $e'); // Debug
       setState(() {
         _errorMessage = e.toString().replaceFirst('Exception: ', '');
       });
     } catch (e) {
+      print('VirtuCam Unknown Error: $e'); // Debug
       setState(() {
-        _errorMessage = 'An unexpected error occurred. Please try again.';
+        _errorMessage = 'Network error. Please check your connection';
       });
     } finally {
       if (mounted) {

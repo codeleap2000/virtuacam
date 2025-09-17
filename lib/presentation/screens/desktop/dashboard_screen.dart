@@ -141,7 +141,6 @@ class _VirtuCamDashboardState extends State<VirtuCamDashboard>
         return;
       }
 
-      // Navigate to media browser
       Navigator.push(
         context,
         MaterialPageRoute(

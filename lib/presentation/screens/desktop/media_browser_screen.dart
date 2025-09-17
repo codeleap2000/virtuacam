@@ -2,6 +2,8 @@
 import 'package:flutter/material.dart';
 import 'dart:io';
 import 'package:path/path.dart' as path;
+import 'package:file_picker/file_picker.dart';
+import 'package:video_player/video_player.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../services/auth_service.dart';
 
@@ -20,14 +22,10 @@ class _VirtuCamMediaBrowserScreenState extends State<VirtuCamMediaBrowserScreen>
   late AnimationController _fadeController;
   late Animation<double> _fadeAnimation;
 
-  Directory? _currentDirectory;
-  List<FileSystemEntity> _files = [];
   List<String> _recentFiles = [];
   String? _selectedFile;
   bool _isLoading = false;
-  String? _errorMessage;
-  String _sortBy = 'name';
-  bool _ascending = true;
+  VideoPlayerController? _videoController;
 
   @override
   void initState() {
@@ -42,94 +40,95 @@ class _VirtuCamMediaBrowserScreenState extends State<VirtuCamMediaBrowserScreen>
       CurvedAnimation(parent: _fadeController, curve: Curves.easeInOut),
     );
 
-    _initializeDirectory();
     _fadeController.forward();
   }
 
   @override
   void dispose() {
     _fadeController.dispose();
+    _videoController?.dispose();
     super.dispose();
   }
 
-  void _initializeDirectory() {
-    setState(() {
-      _isLoading = true;
-    });
-
-    try {
-      if (Platform.isMacOS) {
-        _currentDirectory = Directory(
-          '/Users/${Platform.environment['USER']}/Desktop',
-        );
-      } else if (Platform.isWindows) {
-        _currentDirectory = Directory(
-          '${Platform.environment['USERPROFILE']}\\Desktop',
-        );
-      } else {
-        _currentDirectory = Directory.current;
-      }
-
-      if (!_currentDirectory!.existsSync()) {
-        _currentDirectory = Directory.current;
-      }
-
-      _loadDirectory(_currentDirectory!);
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Failed to initialize directory: $e';
-        _isLoading = false;
-      });
+  Future<void> _disposeVideoController() async {
+    if (_videoController != null) {
+      await _videoController!.dispose();
+      _videoController = null;
     }
   }
 
-  void _loadDirectory(Directory directory) {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
+  Future<void> _openFilePickerAndStream() async {
     try {
-      final entities = directory.listSync()
-        ..sort((a, b) {
-          if (_sortBy == 'name') {
-            final comparison = path
-                .basename(a.path)
-                .toLowerCase()
-                .compareTo(path.basename(b.path).toLowerCase());
-            return _ascending ? comparison : -comparison;
-          } else if (_sortBy == 'modified') {
-            final aStat = a.statSync();
-            final bStat = b.statSync();
-            final comparison = aStat.modified.compareTo(bStat.modified);
-            return _ascending ? comparison : -comparison;
-          } else if (_sortBy == 'size') {
-            if (a is File && b is File) {
-              final comparison = a.lengthSync().compareTo(b.lengthSync());
-              return _ascending ? comparison : -comparison;
+      setState(() => _isLoading = true);
+
+      final canUse = await _authService.canUseService();
+      if (!canUse) {
+        _showError(
+          'Usage limit reached. Please upgrade your plan or contact support.',
+        );
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: [
+          ...AppConstants.supportedVideoFormats,
+          ...AppConstants.supportedImageFormats,
+          ...AppConstants.supportedDocumentFormats,
+        ],
+        allowMultiple: false,
+        dialogTitle: 'Select Media File for VirtuCam Streaming',
+      );
+
+      if (result != null && result.files.single.path != null) {
+        final filePath = result.files.single.path!;
+        final fileName = result.files.single.name;
+
+        // Verify file exists and is readable
+        final file = File(filePath);
+        if (!await file.exists()) {
+          _showError('Selected file does not exist or is not accessible.');
+          setState(() => _isLoading = false);
+          return;
+        }
+
+        // Check file size (limit to 100MB)
+        final fileSize = await file.length();
+        if (fileSize > 100 * 1024 * 1024) {
+          _showError('File size too large. Maximum size is 100MB.');
+          setState(() => _isLoading = false);
+          return;
+        }
+
+        final success = await _authService.decrementDailyUsage();
+        if (!success) {
+          _showError('Failed to start streaming. Please try again.');
+          setState(() => _isLoading = false);
+          return;
+        }
+
+        // Add to recent files
+        if (!_recentFiles.contains(filePath)) {
+          setState(() {
+            _recentFiles.insert(0, filePath);
+            if (_recentFiles.length > 10) {
+              _recentFiles.removeLast();
             }
-          }
-          return 0;
-        });
+            _selectedFile = filePath;
+          });
+        }
 
-      setState(() {
-        _currentDirectory = directory;
-        _files = entities;
-        _isLoading = false;
-      });
+        _showSuccess('Streaming $fileName via VirtuCam virtual camera');
+        // TODO: Implement actual streaming
+        // await VirtuCamPlugin.streamFile(filePath);
+      }
+
+      setState(() => _isLoading = false);
     } catch (e) {
-      setState(() {
-        _errorMessage = 'Failed to load directory: $e';
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
+      _showError('Failed to select file: $e');
     }
-  }
-
-  bool _isMediaFile(String filePath) {
-    final extension = path.extension(filePath).toLowerCase().substring(1);
-    return AppConstants.supportedVideoFormats.contains(extension) ||
-        AppConstants.supportedImageFormats.contains(extension) ||
-        AppConstants.supportedDocumentFormats.contains(extension);
   }
 
   IconData _getFileIcon(String filePath) {
@@ -152,41 +151,6 @@ class _VirtuCamMediaBrowserScreenState extends State<VirtuCamMediaBrowserScreen>
     if (bytes < 1024 * 1024 * 1024)
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
-  }
-
-  Future<void> _streamSelectedFile() async {
-    if (_selectedFile == null) return;
-
-    try {
-      final canUse = await _authService.canUseService();
-      if (!canUse) {
-        _showError(
-          'Usage limit reached. Please upgrade your plan or contact support.',
-        );
-        return;
-      }
-
-      final success = await _authService.decrementDailyUsage();
-      if (!success) {
-        _showError('Failed to start streaming. Please try again.');
-        return;
-      }
-
-      // Add to recent files
-      if (!_recentFiles.contains(_selectedFile!)) {
-        setState(() {
-          _recentFiles.insert(0, _selectedFile!);
-          if (_recentFiles.length > 10) {
-            _recentFiles.removeLast();
-          }
-        });
-      }
-
-      _showSuccess('Streaming $_selectedFile via VirtuCam virtual camera');
-      // Here you would implement the actual streaming logic
-    } catch (e) {
-      _showError('Failed to start streaming: $e');
-    }
   }
 
   void _showError(String message) {
@@ -213,265 +177,171 @@ class _VirtuCamMediaBrowserScreenState extends State<VirtuCamMediaBrowserScreen>
         backgroundColor: Colors.blue[600],
         foregroundColor: Colors.white,
         elevation: 0,
-        actions: [
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.sort),
-            onSelected: (value) {
-              if (value == _sortBy) {
-                setState(() => _ascending = !_ascending);
-              } else {
-                setState(() {
-                  _sortBy = value;
-                  _ascending = true;
-                });
-              }
-              if (_currentDirectory != null) {
-                _loadDirectory(_currentDirectory!);
-              }
-            },
-            itemBuilder: (context) => [
-              const PopupMenuItem(value: 'name', child: Text('Sort by Name')),
-              const PopupMenuItem(
-                value: 'modified',
-                child: Text('Sort by Date'),
-              ),
-              const PopupMenuItem(value: 'size', child: Text('Sort by Size')),
-            ],
-          ),
-        ],
       ),
       body: FadeTransition(
         opacity: _fadeAnimation,
         child: Row(
           children: [
-            Expanded(flex: 3, child: _buildFileExplorer(isSmallScreen)),
-            if (!isSmallScreen) Container(width: 1, color: Colors.grey[300]),
-            if (!isSmallScreen)
-              Expanded(flex: 2, child: _buildPreviewPanel(isSmallScreen)),
+            // Left side - Finder button and recent files
+            Expanded(flex: 2, child: _buildLeftPanel(isSmallScreen)),
+            Container(width: 1, color: Colors.grey[300]),
+            // Right side - Preview panel
+            Expanded(flex: 2, child: _buildPreviewPanel(isSmallScreen)),
           ],
         ),
       ),
-      bottomNavigationBar: _buildBottomBar(isSmallScreen),
     );
   }
 
-  Widget _buildFileExplorer(bool isSmallScreen) {
-    return Column(
-      children: [
-        _buildNavigationBar(isSmallScreen),
-        if (_recentFiles.isNotEmpty) _buildRecentFiles(isSmallScreen),
-        Expanded(
-          child: _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : _errorMessage != null
-              ? _buildErrorView()
-              : _buildFileGrid(isSmallScreen),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildNavigationBar(bool isSmallScreen) {
+  Widget _buildLeftPanel(bool isSmallScreen) {
     return Container(
-      padding: EdgeInsets.all(isSmallScreen ? 12 : 16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(bottom: BorderSide(color: Colors.grey[200]!)),
-      ),
-      child: Row(
-        children: [
-          IconButton(
-            onPressed: _currentDirectory?.parent != null
-                ? () => _loadDirectory(_currentDirectory!.parent)
-                : null,
-            icon: const Icon(Icons.arrow_back),
-            tooltip: 'Go back',
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Container(
-              padding: EdgeInsets.symmetric(
-                horizontal: isSmallScreen ? 8 : 12,
-                vertical: isSmallScreen ? 6 : 8,
-              ),
-              decoration: BoxDecoration(
-                color: Colors.grey[100],
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                _currentDirectory?.path ?? '',
-                style: TextStyle(
-                  fontSize: isSmallScreen ? 12 : 14,
-                  fontFamily: 'monospace',
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: _currentDirectory != null
-                ? () => _loadDirectory(_currentDirectory!)
-                : null,
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh',
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRecentFiles(bool isSmallScreen) {
-    return Container(
-      padding: EdgeInsets.all(isSmallScreen ? 12 : 16),
-      decoration: BoxDecoration(
-        color: Colors.blue[50],
-        border: Border(bottom: BorderSide(color: Colors.grey[200]!)),
-      ),
+      color: Colors.white,
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Recent Files',
-            style: TextStyle(
-              fontSize: isSmallScreen ? 14 : 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.blue[700],
-            ),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            height: 40,
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
-              itemCount: _recentFiles.length,
-              itemBuilder: (context, index) {
-                final file = _recentFiles[index];
-                return Container(
-                  margin: const EdgeInsets.only(right: 8),
-                  child: ActionChip(
-                    avatar: Icon(
-                      _getFileIcon(file),
-                      size: 16,
-                      color: Colors.blue[600],
-                    ),
-                    label: Text(
-                      path.basename(file),
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    onPressed: () {
-                      setState(() => _selectedFile = file);
-                    },
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildFileGrid(bool isSmallScreen) {
-    final mediaFiles = _files.where((file) {
-      return file is File && _isMediaFile(file.path);
-    }).toList();
-
-    final directories = _files.where((file) => file is Directory).toList();
-
-    return ListView(
-      padding: EdgeInsets.all(isSmallScreen ? 12 : 16),
-      children: [
-        if (directories.isNotEmpty) ...[
-          Text(
-            'Folders',
-            style: TextStyle(
-              fontSize: isSmallScreen ? 14 : 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.grey[700],
-            ),
-          ),
-          const SizedBox(height: 8),
-          ...directories.map(
-            (dir) => _buildDirectoryTile(dir as Directory, isSmallScreen),
-          ),
-          const SizedBox(height: 16),
-        ],
-        if (mediaFiles.isNotEmpty) ...[
-          Text(
-            'Media Files (${mediaFiles.length})',
-            style: TextStyle(
-              fontSize: isSmallScreen ? 14 : 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.grey[700],
-            ),
-          ),
-          const SizedBox(height: 8),
-          ...mediaFiles.map(
-            (file) => _buildFileTile(file as File, isSmallScreen),
-          ),
-        ],
-        if (mediaFiles.isEmpty && directories.isEmpty)
-          const Center(
+          // Finder button section
+          Container(
+            padding: EdgeInsets.all(isSmallScreen ? 20 : 32),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.folder_open, size: 64, color: Colors.grey),
-                SizedBox(height: 16),
-                Text('No media files found in this directory'),
+                Container(
+                  padding: EdgeInsets.all(isSmallScreen ? 16 : 20),
+                  decoration: BoxDecoration(
+                    color: Colors.blue[600],
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Platform.isMacOS ? Icons.folder : Icons.file_open,
+                    size: isSmallScreen ? 32 : 48,
+                    color: Colors.white,
+                  ),
+                ),
+                SizedBox(height: isSmallScreen ? 16 : 24),
+                Text(
+                  'Select Media File',
+                  style: TextStyle(
+                    fontSize: isSmallScreen ? 18 : 24,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blue[700],
+                  ),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Choose videos, images, or documents to stream via VirtuCam',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: isSmallScreen ? 14 : 16,
+                    color: Colors.grey[600],
+                  ),
+                ),
+                SizedBox(height: isSmallScreen ? 20 : 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _isLoading ? null : _openFilePickerAndStream,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue[600],
+                      foregroundColor: Colors.white,
+                      padding: EdgeInsets.symmetric(
+                        vertical: isSmallScreen ? 16 : 20,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 4,
+                    ),
+                    icon: _isLoading
+                        ? SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.white,
+                              ),
+                            ),
+                          )
+                        : Icon(
+                            Platform.isMacOS ? Icons.folder : Icons.file_open,
+                            size: isSmallScreen ? 20 : 24,
+                          ),
+                    label: Text(
+                      _isLoading
+                          ? 'Loading...'
+                          : Platform.isMacOS
+                          ? 'Open Finder'
+                          : 'Browse Files',
+                      style: TextStyle(
+                        fontSize: isSmallScreen ? 16 : 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
-      ],
-    );
-  }
 
-  Widget _buildDirectoryTile(Directory directory, bool isSmallScreen) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 4),
-      child: ListTile(
-        leading: Icon(Icons.folder, color: Colors.orange[600]),
-        title: Text(
-          path.basename(directory.path),
-          style: TextStyle(fontSize: isSmallScreen ? 14 : 16),
-        ),
-        onTap: () => _loadDirectory(directory),
-        trailing: const Icon(Icons.chevron_right),
-      ),
-    );
-  }
-
-  Widget _buildFileTile(File file, bool isSmallScreen) {
-    final isSelected = _selectedFile == file.path;
-    final fileStats = file.statSync();
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 4),
-      color: isSelected ? Colors.blue[50] : null,
-      child: ListTile(
-        leading: Icon(
-          _getFileIcon(file.path),
-          color: isSelected ? Colors.blue[600] : Colors.grey[600],
-        ),
-        title: Text(
-          path.basename(file.path),
-          style: TextStyle(
-            fontSize: isSmallScreen ? 14 : 16,
-            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-          ),
-        ),
-        subtitle: Text(
-          '${_formatFileSize(fileStats.size)} • ${_formatDate(fileStats.modified)}',
-          style: TextStyle(fontSize: isSmallScreen ? 12 : 13),
-        ),
-        onTap: () {
-          setState(() {
-            _selectedFile = isSelected ? null : file.path;
-          });
-        },
-        trailing: isSelected
-            ? Icon(Icons.check_circle, color: Colors.blue[600])
-            : null,
+          // Recent files section
+          if (_recentFiles.isNotEmpty) ...[
+            Divider(color: Colors.grey[300]),
+            Expanded(
+              child: Container(
+                padding: EdgeInsets.all(isSmallScreen ? 16 : 20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Recent Files',
+                      style: TextStyle(
+                        fontSize: isSmallScreen ? 16 : 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.orange[700],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: _recentFiles.length,
+                        itemBuilder: (context, index) {
+                          final filePath = _recentFiles[index];
+                          final fileName = path.basename(filePath);
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            child: ListTile(
+                              leading: Icon(
+                                _getFileIcon(filePath),
+                                color: Colors.blue[600],
+                              ),
+                              title: Text(
+                                fileName,
+                                style: TextStyle(
+                                  fontSize: isSmallScreen ? 14 : 16,
+                                ),
+                              ),
+                              subtitle: Text(
+                                filePath,
+                                style: TextStyle(
+                                  fontSize: isSmallScreen ? 12 : 13,
+                                  color: Colors.grey[600],
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              onTap: () async {
+                                await _disposeVideoController();
+                                setState(() => _selectedFile = filePath);
+                              },
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -522,6 +392,8 @@ class _VirtuCamMediaBrowserScreenState extends State<VirtuCamMediaBrowserScreen>
 
   Widget _buildFilePreview(bool isSmallScreen) {
     final extension = path.extension(_selectedFile!).toLowerCase().substring(1);
+    final fileName = path.basename(_selectedFile!);
+    final file = File(_selectedFile!);
 
     return Padding(
       padding: EdgeInsets.all(isSmallScreen ? 12 : 16),
@@ -529,7 +401,7 @@ class _VirtuCamMediaBrowserScreenState extends State<VirtuCamMediaBrowserScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            path.basename(_selectedFile!),
+            fileName,
             style: TextStyle(
               fontSize: isSmallScreen ? 16 : 18,
               fontWeight: FontWeight.bold,
@@ -543,113 +415,272 @@ class _VirtuCamMediaBrowserScreenState extends State<VirtuCamMediaBrowserScreen>
               color: Colors.grey[600],
             ),
           ),
+          FutureBuilder<FileStat>(
+            future: file.stat(),
+            builder: (context, snapshot) {
+              if (snapshot.hasData) {
+                return Text(
+                  'Size: ${_formatFileSize(snapshot.data!.size)}',
+                  style: TextStyle(
+                    fontSize: isSmallScreen ? 12 : 14,
+                    color: Colors.grey[600],
+                  ),
+                );
+              }
+              return const SizedBox.shrink();
+            },
+          ),
           const SizedBox(height: 16),
-          Expanded(
-            child: Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: Colors.grey[100],
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey[300]!),
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    _getFileIcon(_selectedFile!),
-                    size: 64,
-                    color: Colors.grey[400],
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Preview not available',
-                    style: TextStyle(color: Colors.grey[600]),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'File will be streamed directly',
-                    style: TextStyle(fontSize: 12, color: Colors.grey[500]),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          Expanded(child: _buildPreviewContent(extension, file, isSmallScreen)),
         ],
       ),
     );
   }
 
-  Widget _buildBottomBar(bool isSmallScreen) {
-    return Container(
-      padding: EdgeInsets.all(isSmallScreen ? 12 : 16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(top: BorderSide(color: Colors.grey[200]!)),
-      ),
-      child: Row(
-        children: [
-          if (_selectedFile != null) ...[
-            Expanded(
-              child: Text(
-                path.basename(_selectedFile!),
-                style: TextStyle(
-                  fontSize: isSmallScreen ? 12 : 14,
-                  fontWeight: FontWeight.w500,
+  Widget _buildPreviewContent(String extension, File file, bool isSmallScreen) {
+    // Image Preview
+    if (AppConstants.supportedImageFormats.contains(extension)) {
+      return Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: Colors.grey[100],
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.file(
+            file,
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stackTrace) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.error_outline, size: 48, color: Colors.red[400]),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Failed to load image',
+                      style: TextStyle(color: Colors.red[600]),
+                    ),
+                  ],
                 ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            const SizedBox(width: 16),
-          ],
-          ElevatedButton.icon(
-            onPressed: _selectedFile != null ? _streamSelectedFile : null,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.blue[600],
-              foregroundColor: Colors.white,
-              padding: EdgeInsets.symmetric(
-                horizontal: isSmallScreen ? 16 : 20,
-                vertical: isSmallScreen ? 12 : 14,
-              ),
-            ),
-            icon: const Icon(Icons.play_arrow),
-            label: Text(
-              'Stream via VirtuCam',
-              style: TextStyle(fontSize: isSmallScreen ? 14 : 16),
-            ),
+              );
+            },
           ),
-        ],
-      ),
-    );
-  }
+        ),
+      );
+    }
 
-  Widget _buildErrorView() {
-    return Center(
+    // Video Preview
+    if (AppConstants.supportedVideoFormats.contains(extension)) {
+      return VideoPreviewWidget(
+        file: file,
+        isSmallScreen: isSmallScreen,
+        onVideoControllerCreated: (controller) {
+          _videoController = controller;
+        },
+      );
+    }
+
+    // PDF Preview - Replace this section in _buildPreviewContent method
+    if (extension == 'pdf') {
+      return Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: Colors.grey[100],
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.picture_as_pdf, size: 64, color: Colors.red[400]),
+            const SizedBox(height: 16),
+            Text('PDF Preview'),
+            const SizedBox(height: 8),
+            Text(
+              'PDF preview not available on macOS\nFile will be streamed directly',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+            ),
+          ],
+        ),
+      );
+    }
+    // Default placeholder for unsupported formats
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[300]!),
+      ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.error_outline, size: 64, color: Colors.red[400]),
+          Icon(_getFileIcon(file.path), size: 64, color: Colors.grey[400]),
           const SizedBox(height: 16),
           Text(
-            'Error loading directory',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              color: Colors.red[700],
-            ),
+            'Preview not available',
+            style: TextStyle(color: Colors.grey[600]),
           ),
           const SizedBox(height: 8),
-          Text(_errorMessage!),
-          const SizedBox(height: 16),
-          ElevatedButton(
-            onPressed: _initializeDirectory,
-            child: const Text('Retry'),
+          Text(
+            'File will be streamed directly',
+            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
           ),
         ],
       ),
     );
   }
+}
 
-  String _formatDate(DateTime date) {
-    return '${date.day}/${date.month}/${date.year}';
+class VideoPreviewWidget extends StatefulWidget {
+  final File file;
+  final bool isSmallScreen;
+  final Function(VideoPlayerController)? onVideoControllerCreated;
+
+  const VideoPreviewWidget({
+    super.key,
+    required this.file,
+    required this.isSmallScreen,
+    this.onVideoControllerCreated,
+  });
+
+  @override
+  State<VideoPreviewWidget> createState() => _VideoPreviewWidgetState();
+}
+
+class _VideoPreviewWidgetState extends State<VideoPreviewWidget> {
+  VideoPlayerController? _controller;
+  bool _isInitialized = false;
+  bool _hasError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeVideo();
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _initializeVideo() async {
+    try {
+      _controller = VideoPlayerController.file(widget.file);
+      widget.onVideoControllerCreated?.call(_controller!);
+
+      await _controller!.initialize();
+
+      if (mounted) {
+        setState(() {
+          _isInitialized = true;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[300]!, width: 2),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: _hasError
+            ? Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.error_outline, size: 48, color: Colors.red[400]),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Failed to load video',
+                      style: TextStyle(color: Colors.red[600]),
+                    ),
+                  ],
+                ),
+              )
+            : !_isInitialized
+            ? const Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CircularProgressIndicator(color: Colors.white),
+                    SizedBox(height: 16),
+                    Text(
+                      'Loading video...',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                  ],
+                ),
+              )
+            : Stack(
+                children: [
+                  Center(
+                    child: AspectRatio(
+                      aspectRatio: _controller!.value.aspectRatio,
+                      child: VideoPlayer(_controller!),
+                    ),
+                  ),
+                  Positioned(
+                    bottom: 16,
+                    right: 16,
+                    child: FloatingActionButton(
+                      mini: true,
+                      backgroundColor: Colors.black54,
+                      onPressed: () {
+                        setState(() {
+                          if (_controller!.value.isPlaying) {
+                            _controller!.pause();
+                          } else {
+                            _controller!.play();
+                          }
+                        });
+                      },
+                      child: Icon(
+                        _controller!.value.isPlaying
+                            ? Icons.pause
+                            : Icons.play_arrow,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: 16,
+                    left: 16,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text(
+                        'Video Preview',
+                        style: TextStyle(color: Colors.white, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
   }
 }

@@ -14,24 +14,57 @@ class AuthService {
   bool get isAuthenticated => _auth.currentUser != null;
 
   Future<UserCredential> signInWithEmail(String email, String password) async {
-    try {
-      final userCredential = await _auth.signInWithEmailAndPassword(
-        email: email.trim(),
-        password: password,
-      );
+    int retryCount = 0;
+    const maxRetries = 3;
 
-      if (userCredential.user != null) {
-        await _deviceService.trackDeviceInFirebase(userCredential.user!.uid);
-        await _updateLastLogin(userCredential.user!.uid);
-        await _resetDailyUsageIfNeeded(userCredential.user!.uid);
+    while (retryCount < maxRetries) {
+      try {
+        print(
+          'AuthService: Attempt ${retryCount + 1} - Starting Firebase sign in...',
+        );
+
+        final userCredential = await _auth
+            .signInWithEmailAndPassword(email: email.trim(), password: password)
+            .timeout(
+              const Duration(seconds: 10),
+              onTimeout: () {
+                throw Exception('Connection timeout - please try again');
+              },
+            );
+
+        print('AuthService: Sign in successful');
+
+        if (userCredential.user != null) {
+          await _deviceService.trackDeviceInFirebase(userCredential.user!.uid);
+          await _updateLastLogin(userCredential.user!.uid);
+          await _resetDailyUsageIfNeeded(userCredential.user!.uid);
+        }
+
+        return userCredential;
+      } on FirebaseAuthException catch (e) {
+        if (e.code == 'network-request-failed' && retryCount < maxRetries - 1) {
+          retryCount++;
+          print(
+            'AuthService: Network error, retrying in 2 seconds... (${retryCount}/$maxRetries)',
+          );
+          await Future.delayed(const Duration(seconds: 2));
+          continue;
+        }
+        throw _handleAuthException(e);
+      } catch (e) {
+        if (retryCount < maxRetries - 1) {
+          retryCount++;
+          print(
+            'AuthService: Error occurred, retrying... (${retryCount}/$maxRetries)',
+          );
+          await Future.delayed(const Duration(seconds: 2));
+          continue;
+        }
+        throw Exception('Connection failed after $maxRetries attempts');
       }
-
-      return userCredential;
-    } on FirebaseAuthException catch (e) {
-      throw _handleAuthException(e);
-    } catch (e) {
-      throw Exception('An unexpected error occurred during sign in');
     }
+
+    throw Exception('Maximum retry attempts exceeded');
   }
 
   Future<UserCredential> createUserWithEmail(

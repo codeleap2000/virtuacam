@@ -41,6 +41,9 @@ dependencies:
   qr_flutter: ^4.1.0
   crypto: ^3.0.6
   shared_preferences: ^2.5.3
+  file_picker: ^10.3.3
+  video_player: ^2.10.0
+  flutter_pdfview: ^1.4.1+1
 
 dev_dependencies:
   flutter_test:
